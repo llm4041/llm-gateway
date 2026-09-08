@@ -55,6 +55,16 @@ type Channel = {
   totalRequests: number;
   totalFailures: number;
   totalTokens: number;
+  groupKey: string | null;
+  groupIndex: number | null;
+};
+
+/** 列表行：可能是单个渠道，也可能是「多 Key 拆分出来」的渠道组（含 children） */
+type Row = Channel & {
+  rowKey: string;
+  isGroup?: boolean;
+  members?: Channel[];
+  children?: Row[];
 };
 
 const PROVIDERS = [
@@ -96,6 +106,9 @@ export default function Channels() {
   const [keyword, setKeyword] = useState('');
   const [modelOptions, setModelOptions] = useState<string[]>([]);
   const [probing, setProbing] = useState(false);
+  // 多 Key 拆分出的渠道组：列表默认折叠显示
+  const [groupView, setGroupView] = useState(true);
+  const [editingGroup, setEditingGroup] = useState<string | null>(null);
 
   // 模型批量测试
   const [testRow, setTestRow] = useState<Channel | null>(null);
@@ -151,6 +164,7 @@ export default function Channels() {
 
   const openCreate = () => {
     setEditing(null);
+    setEditingGroup(null);
     form.resetFields();
     setModelOptions([]);
     form.setFieldsValue({
@@ -165,6 +179,7 @@ export default function Channels() {
 
   const openEdit = (row: Channel) => {
     setEditing(row);
+    setEditingGroup(null);
     setModelOptions(row.models || []);
     form.setFieldsValue({
       ...row,
@@ -203,10 +218,61 @@ export default function Channels() {
     };
 
     try {
-      if (editing) await api.put(`/api/channels/${editing.id}`, payload);
-      else await api.post('/api/channels', { ...payload, apiKey: v.apiKey || '' });
-      message.success('保存成功');
+      if (editingGroup) {
+        const r = await api.put<{ count: number }>('/api/channels/group', {
+          groupKey: editingGroup,
+          provider: payload.provider,
+          baseUrl: payload.baseUrl,
+          models: payload.models,
+          modelMapping,
+          priority: payload.priority,
+          weight: payload.weight,
+          healthCheck: payload.healthCheck,
+        });
+        message.success(`已同步 ${r.count} 条渠道配置`);
+      } else if (editing) {
+        await api.put(`/api/channels/${editing.id}`, payload);
+        message.success('保存成功');
+      } else {
+        const r = await api.post<{ count: number }>('/api/channels', { ...payload, apiKey: v.apiKey || '' });
+        message.success(r.count > 1 ? `已创建 ${r.count} 条渠道（名称自动加序号 -1 ~ -${r.count}）` : '保存成功');
+      }
       setDrawerOpen(false);
+      void load();
+    } catch (e: any) {
+      message.error(e.message);
+    }
+  };
+
+  /** 编辑整个渠道组的共享配置（不含名称与 Key） */
+  const openEditGroup = (row: Row) => {
+    const members = row.members || [];
+    if (!members.length) return;
+    setEditing(null);
+    setEditingGroup(row.groupKey || null);
+    setModelOptions(members[0].models || []);
+    form.setFieldsValue({
+      provider: members[0].provider,
+      baseUrl: members[0].baseUrl,
+      models: members[0].models || [],
+      priority: members[0].priority,
+      weight: members[0].weight,
+      healthCheck: members[0].healthCheck !== 0,
+      modelMappingText: Object.entries(members[0].modelMapping || {})
+        .map(([k, v]) => `${k}=${v}`)
+        .join('\n'),
+    });
+    setDrawerOpen(true);
+  };
+
+  const toggleGroup = async (row: Row, enabled: boolean) => {
+    if (!row.groupKey) return;
+    try {
+      const r = await api.post<{ count: number }>('/api/channels/group/toggle', {
+        groupKey: row.groupKey,
+        enabled: enabled ? 1 : 0,
+      });
+      message.success(`已${enabled ? '启用' : '停用'} ${r.count} 条渠道`);
       void load();
     } catch (e: any) {
       message.error(e.message);
@@ -313,9 +379,13 @@ export default function Channels() {
     }
     setProbing(true);
     try {
+      const firstKey = (v.apiKey || '')
+        .split(/[\r\n,;，；]+/)
+        .map((s: string) => s.trim())
+        .filter(Boolean)[0] || '';
       const r = await api.post<{ models: string[] }>('/api/channels/probe-models', {
         baseUrl: v.baseUrl,
-        apiKey: v.apiKey || '',
+        apiKey: firstKey,
         provider: v.provider || 'openai-compatible',
       });
       setModelOptions(r.models);
@@ -348,6 +418,40 @@ export default function Channels() {
       (r.models || []).some((m) => m.toLowerCase().includes(keyword.toLowerCase())),
   );
 
+  /** 按 group_key 折叠：组内成员作为 children，组行展示汇总 */
+  const displayRows: Row[] = (() => {
+    if (!groupView) return filtered.map((c) => ({ ...c, rowKey: String(c.id) }));
+    const groups = new Map<string, Channel[]>();
+    const singles: Channel[] = [];
+    filtered.forEach((c) => {
+      if (c.groupKey) {
+        const list = groups.get(c.groupKey) || [];
+        list.push(c);
+        groups.set(c.groupKey, list);
+      } else {
+        singles.push(c);
+      }
+    });
+    const out: Row[] = singles.map((c) => ({ ...c, rowKey: String(c.id) }));
+    groups.forEach((members, gk) => {
+      const sorted = [...members].sort((a, b) => (a.groupIndex ?? 0) - (b.groupIndex ?? 0));
+      const first = sorted[0];
+      const baseName = first.name.replace(new RegExp(`-${first.groupIndex ?? 1}$`), '') || first.name;
+      out.push({
+        ...first,
+        rowKey: `group:${gk}`,
+        isGroup: true,
+        members: sorted,
+        name: baseName,
+        totalRequests: sorted.reduce((s, m) => s + m.totalRequests, 0),
+        totalFailures: sorted.reduce((s, m) => s + m.totalFailures, 0),
+        totalTokens: sorted.reduce((s, m) => s + m.totalTokens, 0),
+        children: sorted.map((m) => ({ ...m, rowKey: String(m.id) })),
+      });
+    });
+    return out;
+  })();
+
   return (
     <div>
       <div className="page-title">
@@ -361,6 +465,12 @@ export default function Channels() {
             style={{ width: 240 }}
             onChange={(e) => setKeyword(e.target.value)}
           />
+          <Tooltip title="多 Key 拆分出的渠道会归为一组，折叠后只显示一行汇总">
+            <Space size={4}>
+              <Switch size="small" checked={groupView} onChange={setGroupView} />
+              <Typography.Text type="secondary">按组折叠</Typography.Text>
+            </Space>
+          </Tooltip>
           <Button icon={<DownloadOutlined />} onClick={() => setBatchOpen(true)}>
             批量导入
           </Button>
@@ -375,9 +485,9 @@ export default function Channels() {
 
       <Card className="card" styles={{ body: { padding: 0 } }}>
         <Table
-          rowKey="id"
+          rowKey="rowKey"
           loading={loading}
-          dataSource={filtered}
+          dataSource={displayRows}
           scroll={{ x: 1400 }}
           pagination={{ pageSize: 10, showSizeChanger: true, showTotal: (t) => `共 ${t} 个渠道` }}
           columns={[
@@ -386,7 +496,18 @@ export default function Channels() {
               dataIndex: 'status',
               width: 92,
               fixed: 'left',
-              render: (s: string, r: Channel) => {
+              render: (s: string, r: Row) => {
+                if (r.isGroup) {
+                  const ms = r.members || [];
+                  const ok = ms.filter((m) => m.enabled && !(m.cooldownUntil && m.cooldownUntil > Date.now())).length;
+                  return (
+                    <Tooltip title={`${ok} 条可用 / 共 ${ms.length} 条（展开可单独管理）`}>
+                      <Tag color={ok ? 'success' : 'error'} bordered={false}>
+                        {ok}/{ms.length} 可用
+                      </Tag>
+                    </Tooltip>
+                  );
+                }
                 const m = STATUS_MAP[s] || STATUS_MAP.unknown;
                 const tip = r.lastError ? `最近错误：${r.lastError}` : '';
                 return (
@@ -401,7 +522,24 @@ export default function Channels() {
                 );
               },
             },
-            { title: '名称', dataIndex: 'name', width: 160, fixed: 'left', ellipsis: true },
+            {
+              title: '名称',
+              dataIndex: 'name',
+              width: 160,
+              fixed: 'left',
+              ellipsis: true,
+              render: (v: string, r: Row) =>
+                r.isGroup ? (
+                  <Space size={4}>
+                    <span>{v}</span>
+                    <Tag color="blue" bordered={false} style={{ fontSize: 10 }}>
+                      {(r.members || []).length} Key
+                    </Tag>
+                  </Space>
+                ) : (
+                  v
+                ),
+            },
             {
               title: 'Base URL',
               dataIndex: 'baseUrl',
@@ -416,7 +554,10 @@ export default function Channels() {
               title: 'Key',
               dataIndex: 'apiKey',
               width: 130,
-              render: (v: string, r: Channel) => (r.hasKey ? <span className="mono">{v}</span> : <Tag>未设置</Tag>),
+              render: (v: string, r: Row) => {
+                if (r.isGroup) return <Tag color="blue">{(r.members || []).length} 个</Tag>;
+                return r.hasKey ? <span className="mono">{v}</span> : <Tag>未设置</Tag>;
+              },
             },
             {
               title: '模型',
@@ -445,20 +586,33 @@ export default function Channels() {
               dataIndex: 'latencyMs',
               width: 90,
               align: 'right',
-              render: (v: number | null) => (v == null ? '-' : `${v}ms`),
+              render: (v: number | null, r: Row) => {
+                if (r.isGroup) {
+                  const list = (r.members || []).map((m) => m.latencyMs).filter((x): x is number => x != null);
+                  if (!list.length) return '-';
+                  return `${Math.round(list.reduce((s, x) => s + x, 0) / list.length)}ms`;
+                }
+                return v == null ? '-' : `${v}ms`;
+              },
             },
             {
               title: '连续失败',
               dataIndex: 'failStreak',
               width: 90,
               align: 'center',
-              render: (v: number) => (v > 0 ? <Tag color="red">{v}</Tag> : <span>0</span>),
+              render: (v: number, r: Row) => {
+                if (r.isGroup) {
+                  const sum = (r.members || []).reduce((s, m) => s + m.failStreak, 0);
+                  return sum > 0 ? <Tag color="red">{sum}</Tag> : <span>0</span>;
+                }
+                return v > 0 ? <Tag color="red">{v}</Tag> : <span>0</span>;
+              },
             },
             {
               title: '请求 / 失败',
               width: 110,
               align: 'right',
-              render: (_: any, r: Channel) => `${r.totalRequests} / ${r.totalFailures}`,
+              render: (_: any, r: Row) => `${r.totalRequests} / ${r.totalFailures}`,
             },
             {
               title: '最近检测',
@@ -481,39 +635,72 @@ export default function Channels() {
               title: '操作',
               width: 310,
               fixed: 'right',
-              render: (_: any, r: Channel) => (
-                <Space size={4}>
-                  <Button size="small" type="link" icon={<ThunderboltOutlined />} onClick={() => test(r)}>
-                    测试
-                  </Button>
-                  <Button size="small" type="link" icon={<ExperimentOutlined />} onClick={() => openModelTest(r)}>
-                    模型测试
-                  </Button>
-                  <Button size="small" type="link" onClick={() => fetchModels(r)}>
-                    拉模型
-                  </Button>
-                  <Switch size="small" checked={!!r.enabled} onChange={(c) => toggle(r, c)} />
-                  <Button size="small" type="link" icon={<EditOutlined />} onClick={() => openEdit(r)} />
-                  <Popconfirm title="确认删除该渠道？" onConfirm={async () => {
-                    try {
-                      await api.del(`/api/channels/${r.id}`);
-                      message.success('已删除');
-                      void load();
-                    } catch (e: any) {
-                      message.error(e.message);
-                    }
-                  }}>
-                    <Button size="small" type="link" danger icon={<DeleteOutlined />} />
-                  </Popconfirm>
-                </Space>
-              ),
+              render: (_: any, r: Row) =>
+                r.isGroup ? (
+                  <Space size={4}>
+                    <Button size="small" type="link" icon={<EditOutlined />} onClick={() => openEditGroup(r)}>
+                      改配置
+                    </Button>
+                    <Tooltip title="整组启用 / 停用">
+                      <Switch
+                        size="small"
+                        checked={(r.members || []).some((m) => m.enabled)}
+                        onChange={(c) => toggleGroup(r, c)}
+                      />
+                    </Tooltip>
+                    <Popconfirm
+                      title={`确认删除该组 ${(r.members || []).length} 条渠道？`}
+                      onConfirm={async () => {
+                        try {
+                          const res = await api.post<{ count: number }>('/api/channels/group/delete', {
+                            groupKey: r.groupKey,
+                          });
+                          message.success(`已删除 ${res.count} 条渠道`);
+                          void load();
+                        } catch (e: any) {
+                          message.error(e.message);
+                        }
+                      }}
+                    >
+                      <Button size="small" type="link" danger icon={<DeleteOutlined />} />
+                    </Popconfirm>
+                  </Space>
+                ) : (
+                  <Space size={4}>
+                    <Button size="small" type="link" icon={<ThunderboltOutlined />} onClick={() => test(r)}>
+                      测试
+                    </Button>
+                    <Button size="small" type="link" icon={<ExperimentOutlined />} onClick={() => openModelTest(r)}>
+                      模型测试
+                    </Button>
+                    <Button size="small" type="link" onClick={() => fetchModels(r)}>
+                      拉模型
+                    </Button>
+                    <Switch size="small" checked={!!r.enabled} onChange={(c) => toggle(r, c)} />
+                    <Button size="small" type="link" icon={<EditOutlined />} onClick={() => openEdit(r)} />
+                    <Popconfirm
+                      title="确认删除该渠道？"
+                      onConfirm={async () => {
+                        try {
+                          await api.del(`/api/channels/${r.id}`);
+                          message.success('已删除');
+                          void load();
+                        } catch (e: any) {
+                          message.error(e.message);
+                        }
+                      }}
+                    >
+                      <Button size="small" type="link" danger icon={<DeleteOutlined />} />
+                    </Popconfirm>
+                  </Space>
+                ),
             },
           ]}
         />
       </Card>
 
       <Drawer
-        title={editing ? '编辑渠道' : '新增渠道'}
+        title={editingGroup ? '编辑渠道组配置' : editing ? '编辑渠道' : '新增渠道'}
         width={520}
         open={drawerOpen}
         onClose={() => setDrawerOpen(false)}
@@ -524,9 +711,18 @@ export default function Channels() {
         }
       >
         <Form form={form} layout="vertical">
-          <Form.Item name="name" label="渠道名称" rules={[{ required: true, message: '请输入名称' }]}>
-            <Input placeholder="如：DeepSeek-主用" />
-          </Form.Item>
+          {editingGroup ? (
+            <Alert
+              type="info"
+              showIcon
+              style={{ marginBottom: 16 }}
+              message="组内所有渠道共享这里的配置（名称与 Key 各不相同，不在此修改）"
+            />
+          ) : (
+            <Form.Item name="name" label="渠道名称" rules={[{ required: true, message: '请输入名称' }]}>
+              <Input placeholder="如：DeepSeek-主用" />
+            </Form.Item>
+          )}
           <Form.Item name="provider" label="厂商类型" rules={[{ required: true }]}>
             <Select options={PROVIDERS} />
           </Form.Item>
@@ -538,13 +734,23 @@ export default function Channels() {
           >
             <Input placeholder="https://api.deepseek.com/v1" />
           </Form.Item>
-          <Form.Item
-            name="apiKey"
-            label="API Key"
-            extra={editing ? '留空表示不修改已保存的 Key（列表中只显示掩码）' : ''}
-          >
-            <Input.Password placeholder="sk-xxx" autoComplete="new-password" />
-          </Form.Item>
+          {!editingGroup && (
+            <Form.Item
+              name="apiKey"
+              label="API Key"
+              extra={
+                editing
+                  ? '留空表示不修改已保存的 Key（列表中只显示掩码）'
+                  : '支持填多个：一行一个，会自动拆成多条渠道（名称自动加 -1 / -2 / -3），请求在它们之间轮询'
+              }
+            >
+              {editing ? (
+                <Input.Password placeholder="sk-xxx" autoComplete="new-password" />
+              ) : (
+                <Input.TextArea rows={3} placeholder={'sk-xxx\nsk-yyy（可选，换行分隔多个 Key）'} />
+              )}
+            </Form.Item>
+          )}
           <Form.Item
             name="models"
             label="支持的模型"

@@ -14,6 +14,7 @@ const channelInput = z.object({
   name: z.string().min(1),
   provider: z.string().default('openai-compatible'),
   baseUrl: z.string().min(1),
+  /** 单个 Key；支持换行/逗号分隔多个（多 Key 时自动拆成多条渠道） */
   apiKey: z.string().optional(),
   models: z.array(z.string()).default([]),
   modelMapping: z.record(z.string()).optional(),
@@ -52,7 +53,23 @@ function toView(ch: ChannelRow) {
     totalTokens: ch.total_tokens,
     createdAt: ch.created_at,
     updatedAt: ch.updated_at,
+    groupKey: ch.group_key,
+    groupIndex: ch.group_index,
   };
+}
+
+/** 把输入框里的 Key 文本拆成数组（换行 / 逗号 / 分号分隔，自动去重去空） */
+export function splitKeys(raw: string | undefined | null): string[] {
+  if (!raw) return [];
+  const parts = raw
+    .split(/[\r\n,;，；]+/)
+    .map((k) => k.trim())
+    .filter(Boolean);
+  return Array.from(new Set(parts));
+}
+
+function newGroupKey(): string {
+  return `g${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
 }
 
 function guard(req: FastifyRequest, reply: FastifyReply): boolean {
@@ -213,14 +230,49 @@ export async function channelRoutes(app: FastifyInstance): Promise<void> {
     }
     const v = parsed.data;
     const now = Date.now();
+    const keys = splitKeys(v.apiKey);
+
+    // 多 Key：拆成多条渠道（名称自动加 -1/-2/-3），共享 group_key
+    if (keys.length > 1) {
+      const groupKey = newGroupKey();
+      const ids: number[] = [];
+      keys.forEach((key, i) => {
+        const res = run(
+          `INSERT INTO channels (name, provider, base_url, api_key_enc, models, model_mapping,
+             priority, weight, enabled, health_check, disabled_reason, status, created_at, updated_at,
+             group_key, group_index)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+          `${v.name}-${i + 1}`,
+          v.provider,
+          v.baseUrl,
+          encrypt(key),
+          JSON.stringify(v.models || []),
+          JSON.stringify(v.modelMapping || {}),
+          v.priority,
+          v.weight,
+          v.enabled,
+          v.healthCheck ?? 1,
+          v.enabled ? null : 'manual',
+          'unknown',
+          now,
+          now,
+          groupKey,
+          i + 1,
+        );
+        ids.push(Number(res.lastInsertRowid));
+      });
+      return void reply.send({ data: { ids, groupKey, count: ids.length } });
+    }
+
     const res = run(
       `INSERT INTO channels (name, provider, base_url, api_key_enc, models, model_mapping,
-         priority, weight, enabled, health_check, disabled_reason, status, created_at, updated_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+         priority, weight, enabled, health_check, disabled_reason, status, created_at, updated_at,
+         group_key, group_index)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       v.name,
       v.provider,
       v.baseUrl,
-      encrypt(v.apiKey || ''),
+      encrypt(keys[0] || ''),
       JSON.stringify(v.models || []),
       JSON.stringify(v.modelMapping || {}),
       v.priority,
@@ -231,8 +283,10 @@ export async function channelRoutes(app: FastifyInstance): Promise<void> {
       'unknown',
       now,
       now,
+      null,
+      null,
     );
-    void reply.send({ data: { id: res.lastInsertRowid } });
+    void reply.send({ data: { id: res.lastInsertRowid, ids: [Number(res.lastInsertRowid)], count: 1 } });
   });
 
   app.put('/api/channels/:id', async (req, reply) => {
@@ -295,6 +349,66 @@ export async function channelRoutes(app: FastifyInstance): Promise<void> {
       );
     }
     void reply.send({ data: { ok: true } });
+  });
+
+  /** 组级批量操作：多 Key 拆分出的渠道组（group_key）整体启停 / 改配置 / 删除 */
+
+  app.post('/api/channels/group/toggle', async (req, reply) => {
+    if (!guard(req, reply)) return;
+    const { groupKey, enabled } = (req.body || {}) as { groupKey?: string; enabled?: number };
+    if (!groupKey) return void reply.status(400).send({ error: { message: '缺少 groupKey' } });
+    const rows = all<ChannelRow>('SELECT id FROM channels WHERE group_key = ?', groupKey);
+    if (enabled) {
+      rows.forEach((r) => forceEnable(r.id));
+    } else {
+      run(
+        `UPDATE channels SET enabled = 0, disabled_reason = 'manual', status = 'disabled', updated_at = ? WHERE group_key = ?`,
+        Date.now(),
+        groupKey,
+      );
+    }
+    void reply.send({ data: { ok: true, count: rows.length } });
+  });
+
+  app.put('/api/channels/group', async (req, reply) => {
+    if (!guard(req, reply)) return;
+    const body = (req.body || {}) as {
+      groupKey?: string;
+      provider?: string;
+      baseUrl?: string;
+      models?: string[];
+      modelMapping?: Record<string, string>;
+      priority?: number;
+      weight?: number;
+      healthCheck?: number;
+    };
+    if (!body.groupKey) return void reply.status(400).send({ error: { message: '缺少 groupKey' } });
+    const sets: string[] = [];
+    const params: unknown[] = [];
+    const push = (col: string, val: unknown) => {
+      sets.push(`${col} = ?`);
+      params.push(val);
+    };
+    if (body.provider != null) push('provider', body.provider);
+    if (body.baseUrl != null) push('base_url', body.baseUrl);
+    if (body.models != null) push('models', JSON.stringify(body.models));
+    if (body.modelMapping != null) push('model_mapping', JSON.stringify(body.modelMapping));
+    if (body.priority != null) push('priority', body.priority);
+    if (body.weight != null) push('weight', body.weight);
+    if (body.healthCheck != null) push('health_check', body.healthCheck);
+    if (!sets.length) return void reply.send({ data: { ok: true, count: 0 } });
+    push('updated_at', Date.now());
+    params.push(body.groupKey);
+    const res = run(`UPDATE channels SET ${sets.join(', ')} WHERE group_key = ?`, ...params);
+    void reply.send({ data: { ok: true, count: Number(res.changes ?? 0) } });
+  });
+
+  app.post('/api/channels/group/delete', async (req, reply) => {
+    if (!guard(req, reply)) return;
+    const { groupKey } = (req.body || {}) as { groupKey?: string };
+    if (!groupKey) return void reply.status(400).send({ error: { message: '缺少 groupKey' } });
+    const res = run('DELETE FROM channels WHERE group_key = ?', groupKey);
+    void reply.send({ data: { ok: true, count: Number(res.changes ?? 0) } });
   });
 
   app.post('/api/channels/:id/test', async (req, reply) => {

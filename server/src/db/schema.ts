@@ -27,6 +27,10 @@ export type ChannelRow = {
   total_tokens: number;
   created_at: number;
   updated_at: number;
+  /** 多 Key 拆分出的渠道组标识；单渠道为 null */
+  group_key: string | null;
+  /** 在组内的序号（从 1 开始）；单渠道为 null */
+  group_index: number | null;
 };
 
 export type ModelRouteRow = {

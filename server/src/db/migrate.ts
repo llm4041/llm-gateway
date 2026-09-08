@@ -103,4 +103,11 @@ export function migrate(): void {
   if (!cols.some((c) => c.name === 'health_check')) {
     exec("ALTER TABLE channels ADD COLUMN health_check INTEGER NOT NULL DEFAULT 1");
   }
+  // 多 Key 拆分：同组渠道共享 group_key，group_index 为组内序号
+  if (!cols.some((c) => c.name === 'group_key')) {
+    exec('ALTER TABLE channels ADD COLUMN group_key TEXT');
+  }
+  if (!cols.some((c) => c.name === 'group_index')) {
+    exec('ALTER TABLE channels ADD COLUMN group_index INTEGER');
+  }
 }

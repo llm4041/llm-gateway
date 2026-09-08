@@ -66,6 +66,45 @@ function weightedShuffle<T extends { weight: number }>(items: T[]): T[] {
 }
 
 const rrCursor = new Map<string, number>();
+const groupCursor = new Map<string, number>();
+
+/**
+ * 同一 group_key（多 Key 拆分出的渠道）内部严格轮转，
+ * 保证多 Key 之间请求量均摊，而不是随机命中。
+ */
+function rotateGroups(list: ChannelRow[]): ChannelRow[] {
+  if (!list.length) return list;
+  const buckets = new Map<string, ChannelRow[]>();
+  for (const ch of list) {
+    if (!ch.group_key) continue;
+    const arr = buckets.get(ch.group_key) || [];
+    arr.push(ch);
+    buckets.set(ch.group_key, arr);
+  }
+  if (!buckets.size) return list;
+
+  // 组内先按 group_index 固定顺序，再整体轮转起点，保证多 Key 均摊
+  const rotated = new Map<string, ChannelRow[]>();
+  buckets.forEach((members, gk) => {
+    const sorted = [...members].sort((a, b) => (a.group_index ?? 0) - (b.group_index ?? 0));
+    const cursor = (groupCursor.get(gk) || 0) % sorted.length;
+    groupCursor.set(gk, cursor + 1);
+    rotated.set(gk, [...sorted.slice(cursor), ...sorted.slice(0, cursor)]);
+  });
+
+  const out: ChannelRow[] = [];
+  const emitted = new Set<string>();
+  for (const ch of list) {
+    if (ch.group_key) {
+      if (emitted.has(ch.group_key)) continue;
+      emitted.add(ch.group_key);
+      out.push(...(rotated.get(ch.group_key) || []));
+    } else {
+      out.push(ch);
+    }
+  }
+  return out;
+}
 
 /**
  * 按路由表选出候选渠道队列（有序）。
@@ -116,7 +155,11 @@ export function selectChannels(publicModel: string): {
       rrCursor.set(key, cursor + 1);
       ordered = [...ordered.slice(cursor), ...ordered.slice(0, cursor)];
     }
-    return { candidates: [...ordered, ...extra].map(toCandidate), routeId: route.id, strategy };
+    return {
+      candidates: [...rotateGroups(ordered), ...extra].map(toCandidate),
+      routeId: route.id,
+      strategy,
+    };
   }
 
   const groups = new Map<number, ChannelRow[]>();
@@ -129,7 +172,7 @@ export function selectChannels(publicModel: string): {
   for (const p of [...groups.keys()].sort((a, b) => a - b)) {
     sorted.push(...weightedShuffle(groups.get(p)!));
   }
-  return { candidates: sorted.map(toCandidate), routeId: null, strategy: 'priority' };
+  return { candidates: rotateGroups(sorted).map(toCandidate), routeId: null, strategy: 'priority' };
 }
 
 /** 聚合所有可用渠道暴露的模型，供 /v1/models 与前端选择使用 */
