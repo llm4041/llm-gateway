@@ -1,0 +1,26 @@
+# 依赖
+node_modules/
+**/node_modules/
+
+# 构建产物（镜像内重新构建）
+server/dist/
+web/dist/
+
+# 运行数据与密钥（绝不打入镜像）
+data/
+**/data/
+.env
+.env.*
+!.env.example
+
+# 开发辅助
+.workbuddy/
+docs/
+scripts/
+*.log
+.git/
+.gitignore
+Dockerfile
+docker-compose.yml
+.dockerignore
+README.md

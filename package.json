@@ -1,0 +1,19 @@
+{
+  "name": "llm-gateway",
+  "version": "0.1.0",
+  "private": true,
+  "description": "LLM API 负载均衡网关：多渠道聚合 / 健康检查 / 故障无感切换",
+  "scripts": {
+    "dev:server": "npm --prefix server run dev",
+    "dev:web": "npm --prefix web run dev",
+    "build:server": "npm --prefix server run build",
+    "build:web": "npm --prefix web run build",
+    "build": "npm run build:web && npm run build:server",
+    "start": "npm --prefix server run start",
+    "typecheck": "npm --prefix server run typecheck",
+    "mock": "node scripts/mock-upstream.js"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
