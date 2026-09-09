@@ -842,7 +842,7 @@ export default function Channels() {
           type="warning"
           showIcon
           style={{ marginBottom: 12 }}
-          message="测试会对每个模型发起 1 次真实对话调用（max_tokens=1）"
+          message="测试会对每个模型发起 1 次真实对话调用（max_tokens=16，上游有下限要求时自动换 64 重试）"
           description="免费模型无费用；收费模型会产生极少量 token 消耗，且个别厂商可能按请求计费，请酌情选择。测试结果不影响渠道熔断状态。"
         />
 

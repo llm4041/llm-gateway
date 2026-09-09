@@ -12,6 +12,16 @@ import {
 
 export { normalizeBaseUrl };
 
+/** 探测用的最小输出长度：部分上游要求 max_tokens > 2（甚至更大），1 会被拒绝 */
+export const PROBE_MAX_TOKENS = 16;
+/** 上游仍嫌小时再试一次的值 */
+export const PROBE_MAX_TOKENS_FALLBACK = 64;
+
+/** 上游报错是否与 max_tokens 取值有关（需要换个值重试） */
+export function isMaxTokensError(text: string): boolean {
+  return /max_tokens/i.test(text || '');
+}
+
 function toUsage(raw: any): Usage | undefined {
   if (!raw || typeof raw !== 'object') return undefined;
   const promptTokens = raw.prompt_tokens ?? raw.input_tokens;
@@ -33,14 +43,14 @@ export const openaiAdaptor: Adaptor = {
     };
   },
 
-  buildHealthChatRequest(ctx: AdaptorContext): UpstreamRequest {
+  buildHealthChatRequest(ctx: AdaptorContext, maxTokens: number = PROBE_MAX_TOKENS): UpstreamRequest {
     return {
       url: joinUrl(ctx.baseUrl, 'chat/completions'),
       headers: authHeaders(ctx.apiKey),
       body: JSON.stringify({
         model: ctx.actualModel,
         messages: [{ role: 'user', content: 'ping' }],
-        max_tokens: 1,
+        max_tokens: maxTokens,
         stream: false,
       }),
     };

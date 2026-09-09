@@ -37,7 +37,7 @@ export interface Adaptor {
   name: string;
   buildChatRequest(ctx: AdaptorContext, body: ChatRequestBody): UpstreamRequest;
   buildModelsRequest(ctx: Pick<AdaptorContext, 'baseUrl' | 'apiKey'>): { url: string; headers: Record<string, string> };
-  buildHealthChatRequest(ctx: AdaptorContext): UpstreamRequest;
+  buildHealthChatRequest(ctx: AdaptorContext, maxTokens?: number): UpstreamRequest;
   parseModelsResponse(json: unknown): string[];
   parseChatResponse(json: any): { text: string; usage?: Usage; finishReason?: string | null };
   parseStreamLine(line: string): ParsedChunk | null;

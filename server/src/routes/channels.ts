@@ -4,6 +4,7 @@ import { all, get, run } from '../db';
 import type { ChannelRow } from '../db/schema';
 import { decrypt, encrypt, maskKey } from '../utils/crypto';
 import { getModelsOf, getMappingOf, resolveActualModel, getAdaptor, normalizeBaseUrl, parseJson, orderedPublicModels } from '../core/selector';
+import { PROBE_MAX_TOKENS_FALLBACK, isMaxTokensError } from '../core/adaptor/openai';
 import { probeChannel } from '../core/health';
 import { forceEnable } from '../core/breaker';
 import { fetchWithTimeout, classifyStatus } from '../utils/errors';
@@ -85,7 +86,7 @@ export type ModelProbeResult = {
   error: string | null;
 };
 
-/** 单次模型可用性探测（真实 chat，max_tokens=1）；纯测试，不影响渠道熔断统计 */
+/** 单次模型可用性探测（真实 chat，最小输出长度）；纯测试，不影响渠道熔断统计 */
 async function probeModel(
   ch: ChannelRow,
   publicModel: string,
@@ -109,6 +110,39 @@ async function probeModel(
 
     if (!res.ok) {
       const c = classifyStatus(res.status, text);
+      // 上游对 max_tokens 有下限要求时（如要求 > 2），换更大的值重试一次
+      if (isMaxTokensError(text)) {
+        const retryReq = adaptor.buildHealthChatRequest({ baseUrl, apiKey, actualModel }, PROBE_MAX_TOKENS_FALLBACK);
+        try {
+          const res2 = await fetchWithTimeout(
+            retryReq.url,
+            { method: 'POST', headers: retryReq.headers, body: retryReq.body },
+            timeoutMs,
+          );
+          const text2 = await res2.text();
+          if (res2.ok && !/"error"/.test(text2.slice(0, 200))) {
+            return {
+              model: publicModel,
+              actualModel,
+              ok: true,
+              latencyMs: Date.now() - started,
+              httpStatus: res2.status,
+              error: null,
+            };
+          }
+          const c2 = classifyStatus(res2.status, text2);
+          return {
+            model: publicModel,
+            actualModel,
+            ok: false,
+            latencyMs: Date.now() - started,
+            httpStatus: res2.status,
+            error: `${c2.message.slice(0, 400)}（已用 max_tokens=${PROBE_MAX_TOKENS_FALLBACK} 重试）`,
+          };
+        } catch {
+          /* 重试失败则沿用首次错误 */
+        }
+      }
       return {
         model: publicModel,
         actualModel,
