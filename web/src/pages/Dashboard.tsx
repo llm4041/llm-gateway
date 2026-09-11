@@ -8,7 +8,7 @@ import { api } from '../api/client';
 type Overview = {
   channels: { total: number; enabled: number; healthy: number; failing: number; disabled: number; unknown: number };
   today: { requests: number; success: number; failed: number; successRate: number; avgLatency: number; tokens: number };
-  trend: Array<{ hour: number; requests: number; success: number }>;
+  trend: Array<{ ts: number; hour: number; label: string; requests: number; success: number }>;
   byChannel: Array<{ channelId: number; channelName: string; requests: number; success: number; avgLatency: number }>;
   byModel: Array<{
     publicModel: string;
@@ -60,22 +60,41 @@ export default function Dashboard() {
     }
   };
 
-  const hours = Array.from({ length: 24 }, (_, i) => `${String(i).padStart(2, '0')}:00`);
-  const reqMap = new Map(data?.trend.map((t) => [t.hour, t.requests]) || []);
-  const okMap = new Map(data?.trend.map((t) => [t.hour, t.success]) || []);
+  // 后端返回的是「当前时间往前 24 个整点」的滚动窗口，按时间正序直接渲染
+  const trend = data?.trend || [];
+  const categories = trend.map((t) => t.label || `${String(t.hour).padStart(2, '0')}:00`);
+  const fullLabels = trend.map((t) =>
+    t.ts ? new Date(t.ts).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '',
+  );
 
   const chartOption = {
     grid: { left: 40, right: 16, top: 30, bottom: 30 },
-    tooltip: { trigger: 'axis' },
+    tooltip: {
+      trigger: 'axis',
+      formatter: (params: any) => {
+        const rows = Array.isArray(params) ? params : [params];
+        const head = fullLabels[rows[0]?.dataIndex] ?? rows[0]?.axisValue ?? '';
+        const body = rows
+          .map((p: any) => `${p.marker}${p.seriesName}：${p.value}`)
+          .join('<br/>');
+        return `${head}<br/>${body}`;
+      },
+    },
     legend: { data: ['请求数', '成功数'], right: 0, top: 0 },
-    xAxis: { type: 'category', data: hours, axisLine: { lineStyle: { color: '#e5e7eb' } } },
-    yAxis: { type: 'value', splitLine: { lineStyle: { color: '#f1f2f6' } } },
+    xAxis: {
+      type: 'category',
+      data: categories,
+      boundaryGap: false,
+      axisLine: { lineStyle: { color: '#e5e7eb' } },
+      axisLabel: { interval: 2 },
+    },
+    yAxis: { type: 'value', splitLine: { lineStyle: { color: '#f1f2f6' } }, minInterval: 1 },
     series: [
       {
         name: '请求数',
         type: 'line',
         smooth: true,
-        data: hours.map((_, i) => reqMap.get(i) || 0),
+        data: trend.map((t) => t.requests || 0),
         itemStyle: { color: '#4f46e5' },
         areaStyle: { color: 'rgba(79,70,229,.10)' },
       },
@@ -83,7 +102,7 @@ export default function Dashboard() {
         name: '成功数',
         type: 'line',
         smooth: true,
-        data: hours.map((_, i) => okMap.get(i) || 0),
+        data: trend.map((t) => t.success || 0),
         itemStyle: { color: '#10b981' },
         areaStyle: { color: 'rgba(16,185,129,.10)' },
       },

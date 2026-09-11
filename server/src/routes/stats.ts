@@ -39,15 +39,35 @@ export async function statsRoutes(app: FastifyInstance): Promise<void> {
       )
       .get(today) as Record<string, number | null>;
 
-    const trend = sqlite
+    // 按「整点桶」聚合：ts/3600000 落在 UTC 整点上，本地时区偏移为整小时时等价于本地整点
+    const trendRows = sqlite
       .prepare(
-        `SELECT (ts / 3600000) AS hour,
+        `SELECT (ts / 3600000) AS bucket,
                 COUNT(*) AS requests,
                 SUM(CASE WHEN ok = 1 THEN 1 ELSE 0 END) AS success
          FROM request_logs WHERE ts >= ?
-         GROUP BY hour ORDER BY hour`,
+         GROUP BY bucket ORDER BY bucket`,
       )
-      .all(since) as Array<{ hour: number; requests: number; success: number }>;
+      .all(since) as Array<{ bucket: number; requests: number; success: number }>;
+
+    const trendMap = new Map<number, { requests: number; success: number }>(
+      trendRows.map((r) => [r.bucket, { requests: r.requests, success: Number(r.success || 0) }]),
+    );
+
+    // 补齐滚动窗口内的 24 个整点（含无数据的小时），按时间正序返回
+    const currentBucket = Math.floor(Date.now() / 3600000);
+    const trend = Array.from({ length: 24 }, (_, i) => {
+      const bucket = currentBucket - 23 + i;
+      const start = bucket * 3600000;
+      const v = trendMap.get(bucket);
+      return {
+        ts: start,
+        hour: new Date(start).getHours(),
+        label: `${String(new Date(start).getHours()).padStart(2, '0')}:00`,
+        requests: v?.requests || 0,
+        success: v?.success || 0,
+      };
+    });
 
     const byChannel = sqlite
       .prepare(
@@ -104,11 +124,7 @@ export async function statsRoutes(app: FastifyInstance): Promise<void> {
           avgLatency: Math.round(Number(todayAgg.avgLatency || 0)),
           tokens: Number(todayAgg.tokens || 0),
         },
-        trend: trend.map((t) => ({
-          hour: new Date(t.hour * 3600000).getHours(),
-          requests: t.requests,
-          success: t.success || 0,
-        })),
+        trend,
         byChannel,
         byModel,
         recentErrors,
