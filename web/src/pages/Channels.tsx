@@ -183,6 +183,8 @@ export default function Channels() {
     setModelOptions(row.models || []);
     form.setFieldsValue({
       ...row,
+      // 关键：不要把列表返回的掩码值回填进输入框，否则保存时会把它当成真实 Key 提交
+      apiKey: '',
       models: row.models || [],
       healthCheck: row.healthCheck !== 0,
       modelMappingText: Object.entries(row.modelMapping || {})
@@ -204,11 +206,16 @@ export default function Channels() {
         if (k && val) modelMapping[k] = val;
       });
 
+    // 兜底：编辑态下若取值仍是列表的掩码，说明用户没改 Key，不提交
+    const keyUntouched = !!editing && v.apiKey === editing.apiKey;
     const payload = {
       name: v.name,
       provider: v.provider,
       baseUrl: v.baseUrl,
-      apiKey: v.apiKey === undefined || v.apiKey === null || v.apiKey === '' ? undefined : v.apiKey,
+      apiKey:
+        v.apiKey === undefined || v.apiKey === null || v.apiKey === '' || keyUntouched
+          ? undefined
+          : v.apiKey,
       models: v.models || [],
       modelMapping,
       priority: v.priority,
@@ -740,7 +747,7 @@ export default function Channels() {
               label="API Key"
               extra={
                 editing
-                  ? '留空表示不修改已保存的 Key（列表中只显示掩码）'
+                  ? `已保存：${editing.hasKey ? editing.apiKey || '（已设置）' : '未设置'}；留空表示不修改，填入新值才会覆盖`
                   : '支持填多个：一行一个，会自动拆成多条渠道（名称自动加 -1 / -2 / -3），请求在它们之间轮询'
               }
             >

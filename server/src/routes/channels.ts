@@ -59,6 +59,16 @@ function toView(ch: ChannelRow) {
   };
 }
 
+/**
+ * 判断是否为列表返回的掩码值（maskKey 产物：前 4 位 + **** + 后 4 位，过短则纯 ****）。
+ * 真实 Key 不会出现连续的 ****，因此用它识别"前端把展示值回传了"这一情况。
+ * 两侧放宽到 8 位，避免掩码形态稍有出入时漏检（漏检会把渠道写坏，代价高于误判）。
+ */
+export function isMaskedKey(raw: string | undefined | null): boolean {
+  if (!raw) return false;
+  return /^\S{0,8}\*{4}\S{0,8}$/.test(raw.trim());
+}
+
 /** 把输入框里的 Key 文本拆成数组（换行 / 逗号 / 分号分隔，自动去重去空） */
 export function splitKeys(raw: string | undefined | null): string[] {
   if (!raw) return [];
@@ -265,6 +275,11 @@ export async function channelRoutes(app: FastifyInstance): Promise<void> {
     const v = parsed.data;
     const now = Date.now();
     const keys = splitKeys(v.apiKey);
+    if (keys.some(isMaskedKey)) {
+      return void reply
+        .status(400)
+        .send({ error: { message: 'API Key 是掩码值（列表中用于展示的脱敏串），请填写真实 Key' } });
+    }
 
     // 多 Key：拆成多条渠道（名称自动加 -1/-2/-3），共享 group_key
     if (keys.length > 1) {
@@ -342,7 +357,8 @@ export async function channelRoutes(app: FastifyInstance): Promise<void> {
     if (v.name != null) push('name', v.name);
     if (v.provider != null) push('provider', v.provider);
     if (v.baseUrl != null) push('base_url', v.baseUrl);
-    if (v.apiKey != null) push('api_key_enc', encrypt(v.apiKey));
+    // 掩码值代表"用户没改 Key"，绝不能落库，否则真实 Key 会被覆盖且无法找回
+    if (v.apiKey != null && !isMaskedKey(v.apiKey)) push('api_key_enc', encrypt(v.apiKey));
     if (v.models != null) push('models', JSON.stringify(v.models));
     if (v.modelMapping != null) push('model_mapping', JSON.stringify(v.modelMapping));
     if (v.priority != null) push('priority', v.priority);
