@@ -1,14 +1,15 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { sqlite } from '../db';
-import type { RequestLogRow } from '../db/schema';
+import type { RequestLogRow, RequestLogDetailRow } from '../db/schema';
 import { requireAdmin } from '../middleware/adminAuth';
 
 function guard(req: FastifyRequest, reply: FastifyReply): boolean {
   return !!requireAdmin(req, reply);
 }
 
-/** snake_case -> camelCase（前端表格列 dataIndex 均为 camelCase） */
-function toView(row: RequestLogRow) {
+/** snake_case -> camelCase（前端表格列 dataIndex 均为 camelCase）
+ *  detail 仅在详情接口带出，列表接口不查明细表避免拖出大字段 */
+function toView(row: RequestLogRow, detail?: RequestLogDetailRow | null) {
   return {
     id: row.id,
     ts: row.ts,
@@ -38,6 +39,14 @@ function toView(row: RequestLogRow) {
       error: string;
       at: number;
     }>,
+    detail: detail
+      ? {
+          requestBody: detail.request_body,
+          responseBody: detail.response_body,
+          reqTruncated: detail.req_truncated === 1,
+          resTruncated: detail.res_truncated === 1,
+        }
+      : null,
   };
 }
 
@@ -97,11 +106,15 @@ export async function logRoutes(app: FastifyInstance): Promise<void> {
     const id = Number((req.params as { id: string }).id);
     const row = sqlite.prepare('SELECT * FROM request_logs WHERE id = ?').get(id) as RequestLogRow | undefined;
     if (!row) return void reply.status(404).send({ error: { message: '日志不存在' } });
-    void reply.send({ data: toView(row) });
+    const detail = sqlite
+      .prepare('SELECT * FROM request_log_details WHERE log_id = ?')
+      .get(id) as RequestLogDetailRow | undefined;
+    void reply.send({ data: toView(row, detail) });
   });
 
   app.delete('/api/logs', async (req, reply) => {
     if (!guard(req, reply)) return;
+    sqlite.prepare('DELETE FROM request_log_details').run();
     sqlite.prepare('DELETE FROM request_logs').run();
     void reply.send({ data: { ok: true } });
   });

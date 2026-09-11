@@ -84,6 +84,15 @@ export type RequestLogInsert = {
 
 export type RequestLogRow = RequestLogInsert & { id: number };
 
+/** 请求/响应报文明细，与 request_logs 1:1；log_id 即 request_logs.id */
+export type RequestLogDetailRow = {
+  log_id: number;
+  request_body: string | null;
+  response_body: string | null;
+  req_truncated: number;
+  res_truncated: number;
+};
+
 export type AdminRow = {
   id: number;
   username: string;

@@ -81,6 +81,15 @@ CREATE TABLE IF NOT EXISTS request_logs (
 CREATE INDEX IF NOT EXISTS idx_logs_ts ON request_logs(ts);
 CREATE INDEX IF NOT EXISTS idx_logs_model ON request_logs(public_model);
 
+-- 请求/响应报文与日志主表 1:1，单独存放避免列表查询 SELECT * 拖出大字段
+CREATE TABLE IF NOT EXISTS request_log_details (
+  log_id INTEGER PRIMARY KEY,
+  request_body TEXT,
+  response_body TEXT,
+  req_truncated INTEGER NOT NULL DEFAULT 0,
+  res_truncated INTEGER NOT NULL DEFAULT 0
+);
+
 CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL,

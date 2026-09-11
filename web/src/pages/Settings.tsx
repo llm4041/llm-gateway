@@ -15,7 +15,10 @@ type Settings = {
   cooldownBaseSec: number;
   cooldownMaxSec: number;
   logRetentionDays: number;
+  logDetailRetentionDays: number;
   autoDisable: number;
+  logBodyEnabled: number;
+  logBodyMaxBytes: number;
 };
 
 export default function Settings() {
@@ -116,6 +119,36 @@ export default function Settings() {
             {num('logRetentionDays', '日志保留天数', '超期日志会被自动清理', 1, 365)}
           </Row>
         </Card>
+
+        <Card className="card" title="日志明细" style={{ marginBottom: 16 }}>
+          <Row gutter={16}>
+            <Col span={8}>
+              <Form.Item name="logBodyEnabled" label="记录报文明细" valuePropName="checked" extra="在日志详情中保存请求体与响应内容，关闭后新日志不再记录">
+                <Switch checkedChildren="开" unCheckedChildren="关" />
+              </Form.Item>
+            </Col>
+            <Col span={8}>
+              <Form.Item
+                name="logBodyMaxBytes"
+                label="单条报文上限（KB）"
+                extra="超出部分截断，避免超长上下文或多模态请求撑大数据库"
+                normalize={(v: number | null) => (v == null ? v : Math.round(v * 1024))}
+                getValueProps={(v: number | null) => ({ value: v == null ? v : Math.round(v / 1024) })}
+              >
+                <InputNumber min={1} max={1024} style={{ width: '100%' }} />
+              </Form.Item>
+            </Col>
+            <Col span={8}>
+              <Form.Item
+                name="logDetailRetentionDays"
+                label="报文保留天数"
+                extra="报文明细到期先删，元数据仍按「日志保留天数」保留；实际不会超过日志保留天数"
+              >
+                <InputNumber min={1} max={30} style={{ width: '100%' }} />
+              </Form.Item>
+            </Col>
+          </Row>
+        </Card>
       </Form>
 
       <Divider />
@@ -123,11 +156,15 @@ export default function Settings() {
         <Button
           danger
           onClick={async () => {
-            await api.post('/api/logs/cleanup');
-            message.success('已按保留策略清理日志');
+            try {
+              const r = await api.post<{ logs: number; details: number }>('/api/logs/cleanup');
+              message.success(`已清理 ${r.logs} 条日志、${r.details} 条报文，并收缩了数据库文件`);
+            } catch (e: any) {
+              message.error(e.message);
+            }
           }}
         >
-          立即清理过期日志
+          立即清理并收缩
         </Button>
       </Space>
     </div>

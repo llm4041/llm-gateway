@@ -41,7 +41,9 @@ export async function systemRoutes(app: FastifyInstance): Promise<void> {
 
   app.post('/api/logs/cleanup', async (req, reply) => {
     if (!guard(req, reply)) return;
-    cleanupLogs(loadSettings().logRetentionDays);
-    void reply.send({ data: { ok: true } });
+    const s = loadSettings();
+    // 手动触发时才 VACUUM：会锁库，不放在定时清理里做
+    const r = cleanupLogs(s.logRetentionDays, s.logDetailRetentionDays, true);
+    void reply.send({ data: { ok: true, logs: r.logs, details: r.details } });
   });
 }

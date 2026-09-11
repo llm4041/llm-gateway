@@ -9,7 +9,7 @@ import { decrypt } from '../utils/crypto';
 import { classifyStatus, fetchWithTimeout, GatewayError, type ErrorType } from '../utils/errors';
 import { estimateMessagesTokens, estimateTokens } from '../utils/tokens';
 import { bumpRequestStats, recordFailure, recordSuccess } from './breaker';
-import { loadSettings } from '../config';
+import { loadSettings, type SysSettings } from '../config';
 import { logger } from '../utils/logger';
 
 export type KeyCtx = { keyId: number | null; keyName: string };
@@ -22,9 +22,39 @@ export type ChatBody = {
   [key: string]: unknown;
 };
 
-function writeLog(entry: Partial<RequestLogInsert>): void {
+/** 报文明细：请求体是发给上游的原始 JSON；响应体是上游原文，流式则为 SSE 拼接后的文本 */
+export type LogDetail = { requestBody?: string; responseBody?: string };
+
+/** 按 UTF-8 字节数截断，避免超长上下文 / 多模态 body 撑爆数据库 */
+function clip(text: string, maxBytes: number): { text: string; truncated: boolean } {
+  if (!text) return { text: '', truncated: false };
+  if (Buffer.byteLength(text, 'utf8') <= maxBytes) return { text, truncated: false };
+  return { text: Buffer.from(text, 'utf8').subarray(0, maxBytes).toString('utf8'), truncated: true };
+}
+
+function saveDetail(logId: number, detail: LogDetail, s: SysSettings): void {
   try {
+    const maxBytes = Math.max(1024, Number(s.logBodyMaxBytes) || 32768);
+    const req = clip(detail.requestBody ?? '', maxBytes);
+    const res = clip(detail.responseBody ?? '', maxBytes);
     run(
+      `INSERT OR REPLACE INTO request_log_details
+         (log_id, request_body, response_body, req_truncated, res_truncated) VALUES (?,?,?,?,?)`,
+      logId,
+      req.text || null,
+      res.text || null,
+      req.truncated ? 1 : 0,
+      res.truncated ? 1 : 0,
+    );
+  } catch (e) {
+    logger.error('[relay] 写报文明细失败', e);
+  }
+}
+
+function writeLog(entry: Partial<RequestLogInsert>, detail: LogDetail | null, s: SysSettings): void {
+  let logId = 0;
+  try {
+    logId = run(
       `INSERT INTO request_logs (
          ts, request_id, key_id, key_name, public_model, channel_id, channel_name, actual_model,
          stream, http_status, ok, error_type, error_msg, latency_ms, first_token_ms,
@@ -52,10 +82,13 @@ function writeLog(entry: Partial<RequestLogInsert>): void {
       entry.retry_count ?? 0,
       entry.failover_chain ?? '[]',
       entry.client_ip ?? null,
-    );
+    ).lastInsertRowid;
   } catch (e) {
     logger.error('[relay] 写日志失败', e);
+    return;
   }
+  if (!detail || Number(s.logBodyEnabled) === 0) return;
+  saveDetail(logId, detail, s);
 }
 
 function baseLog(args: {
@@ -115,6 +148,8 @@ async function attemptNonStream(cand: ChannelCandidate, body: ChatBody, timeoutM
   const estimated = parsed.usage ? 0 : 1;
   return {
     json,
+    requestBody: req.body,
+    responseText: text,
     latencyMs: Date.now() - started,
     promptTokens,
     completionTokens,
@@ -129,7 +164,11 @@ async function attemptStream(
   body: ChatBody,
   reply: FastifyReply,
   timeoutMs: number,
-): Promise<{ firstTokenMs: number; promise: Promise<{ promptTokens: number; completionTokens: number; estimated: number; completed: boolean }> }> {
+): Promise<{
+  firstTokenMs: number;
+  requestBody: string;
+  promise: Promise<{ promptTokens: number; completionTokens: number; estimated: number; completed: boolean; text: string }>;
+}> {
   const adaptor = getAdaptor(cand.channel.provider);
   const apiKey = decrypt(cand.channel.api_key_enc);
   const req = adaptor.buildChatRequest(
@@ -217,7 +256,7 @@ async function attemptStream(
         promptTokens = estimateMessagesTokens(body.messages);
         completionTokens = estimateTokens(accText);
       }
-      return { promptTokens, completionTokens, estimated, completed };
+      return { promptTokens, completionTokens, estimated, completed, text: accText };
     } catch (err) {
       logger.warn(`[relay] 渠道「${cand.channel.name}」流式传输中断: ${(err as Error)?.message}`);
       pt.destroy(err as Error);
@@ -227,11 +266,12 @@ async function attemptStream(
         completionTokens: estimateTokens(accText),
         estimated,
         completed: false,
+        text: accText,
       };
     }
   })();
 
-  return { firstTokenMs, promise };
+  return { firstTokenMs, requestBody: req.body, promise };
 }
 
 type RelayCtx = {
@@ -257,6 +297,18 @@ async function tryRelayModel(
 ): Promise<void> {
   const { s, requestId, key, clientIp, stream, chain } = ctx;
   const { candidates, routeId, strategy } = selectChannels(model);
+  // 客户端原始请求体，仅在写日志时才真正序列化
+  let clientBodyCache: string | null = null;
+  const clientBody = (): string => {
+    if (clientBodyCache === null) {
+      try {
+        clientBodyCache = JSON.stringify(body);
+      } catch {
+        clientBodyCache = '[无法序列化的请求体]';
+      }
+    }
+    return clientBodyCache;
+  };
 
   if (candidates.length === 0) {
     const msg = `没有可用于模型「${model}」的渠道（可能全部停用、冷却中或未配置该模型）`;
@@ -269,7 +321,7 @@ async function tryRelayModel(
       latency_ms: 0,
       retry_count: chain.length,
       failover_chain: JSON.stringify(chain),
-    });
+    }, { requestBody: clientBody() }, s);
     throw new GatewayError(503, msg, 'no_channel', false);
   }
 
@@ -281,9 +333,9 @@ async function tryRelayModel(
     const cand = candidates[attempt];
     try {
       if (stream) {
-        const { firstTokenMs, promise } = await attemptStream(cand, body, reply, s.requestTimeoutMs);
-        const result = await promise;
-        const latencyMs = firstTokenMs;
+        const st = await attemptStream(cand, body, reply, s.requestTimeoutMs);
+        const result = await st.promise;
+        const latencyMs = st.firstTokenMs;
         recordSuccess(cand.channel, latencyMs, s);
         bumpRequestStats(cand.channel, result.completed, result.promptTokens + result.completionTokens);
         writeLog({
@@ -293,14 +345,14 @@ async function tryRelayModel(
           error_type: result.completed ? null : ('stream_aborted' as ErrorType),
           error_msg: result.completed ? null : '上游流式响应未正常结束（未收到 [DONE]）',
           latency_ms: latencyMs,
-          first_token_ms: firstTokenMs,
+          first_token_ms: st.firstTokenMs,
           prompt_tokens: result.promptTokens,
           completion_tokens: result.completionTokens,
           total_tokens: result.promptTokens + result.completionTokens,
           estimated: result.estimated,
           retry_count: attempt,
           failover_chain: JSON.stringify(chain),
-        });
+        }, { requestBody: st.requestBody, responseBody: result.text }, s);
         if (!result.completed) recordFailure(cand.channel, '流式响应中断', 'stream_aborted', s);
         return;
       }
@@ -323,7 +375,7 @@ async function tryRelayModel(
         estimated: r.estimated,
         retry_count: attempt,
         failover_chain: JSON.stringify(chain),
-      });
+      }, { requestBody: r.requestBody, responseBody: r.responseText }, s);
       void reply.send(r.json);
       return;
     } catch (err) {
@@ -370,7 +422,7 @@ async function tryRelayModel(
     error_msg: (lastErr?.message || '转发失败').slice(0, 1000),
     retry_count: chain.length - chainStart,
     failover_chain: JSON.stringify(chain),
-  });
+  }, { requestBody: clientBody(), responseBody: lastErr?.upstreamBody ?? null }, s);
   throw lastErr ?? new GatewayError(502, '转发失败');
 }
 

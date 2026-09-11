@@ -38,7 +38,13 @@ export type SysSettings = {
   cooldownBaseSec: number;
   cooldownMaxSec: number;
   logRetentionDays: number;
+  /** 报文明细保留天数，实际有效期再取 min(logDetailRetentionDays, logRetentionDays) */
+  logDetailRetentionDays: number;
   autoDisable: number;
+  /** 是否记录请求/响应报文到 request_log_details */
+  logBodyEnabled: number;
+  /** 单条报文最大字节数，超出截断（UTF-8 字节） */
+  logBodyMaxBytes: number;
 };
 
 export const DEFAULT_SETTINGS: SysSettings = {
@@ -53,8 +59,11 @@ export const DEFAULT_SETTINGS: SysSettings = {
   recoverThreshold: 2,
   cooldownBaseSec: 300,
   cooldownMaxSec: 3600,
-  logRetentionDays: 30,
+  logRetentionDays: 2,
+  logDetailRetentionDays: 1,
   autoDisable: 1,
+  logBodyEnabled: 1,
+  logBodyMaxBytes: 32768,
 };
 
 export function loadSettings(): SysSettings {
