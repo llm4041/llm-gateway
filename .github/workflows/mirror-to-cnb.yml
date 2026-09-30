@@ -1,11 +1,8 @@
-name: Mirror to CNB
+name: Sync to CNB
 
-# 反向镜像：推到 GitHub 后，由 GitHub Actions 自动把分支和 tag 同步到 CNB。
-# 原因：CNB 的流水线 Runner 在境内无法连通 github.com（连接超时），
-#       而 GitHub 的 Runner 在境外可稳定访问 cnb.cool，故以此方向做自动同步。
-# 启用步骤（已完成）：
-#   GitHub 仓库 Settings → Secrets → 已添加仓库机密 GIT_PASSWORD = CNB 访问令牌(PAT, repo 权限)
-#   之后每次 push 到 main/dev 即自动镜像到 CNB
+# GitHub 为主、CNB 为备：push 到 GitHub 的 main/dev 后，用 CNB 官方插件 git-sync 自动同步到 CNB。
+# 原因：CNB 的流水线 Runner 在境内无法连通 github.com（已实测连接超时），镜像方向反转由 GitHub Runner 执行。
+# 仓库机密：GIT_PASSWORD = CNB 访问令牌(PAT)。参考同账号 workbuddy2api-gui 项目的成熟配置。
 
 on:
   push:
@@ -16,34 +13,18 @@ permissions:
   contents: read
 
 jobs:
-  mirror:
+  sync:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout (full history)
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Mirror all branches & tags to CNB
+      - name: Sync to CNB Repository
+        uses: docker://tencentcom/git-sync
         env:
-          CNB_TOKEN: ${{ secrets.GIT_PASSWORD }}
-        run: |
-          if [ -z "$CNB_TOKEN" ]; then
-            echo "ERROR: 未配置 GitHub Secret GIT_PASSWORD（CNB 访问令牌）"
-            exit 1
-          fi
-          git config --global user.email "github-actions@github.com"
-          git config --global user.name "GitHub Mirror"
-          git fetch origin '+refs/heads/*:refs/heads/*'
-          git fetch origin '+refs/tags/*:refs/tags/*'
-          # CNB PAT 鉴权用户名为 cnb；若令牌为 OAuth 类型则用户名需为 luck4041，失败自动重试
-          mirror_push() {
-            git remote remove cnb 2>/dev/null || true
-            git remote add cnb "https://$1:${CNB_TOKEN}@cnb.cool/luck4041/llm-gateway.git"
-            git push cnb --all --force-with-lease && git push cnb --tags --force-with-lease
-          }
-          if ! mirror_push cnb; then
-            echo "用户名 cnb 推送失败，改用 luck4041 重试..."
-            mirror_push luck4041
-          fi
+          PLUGIN_TARGET_URL: "https://cnb.cool/luck4041/llm-gateway.git"
+          PLUGIN_AUTH_TYPE: "https"
+          PLUGIN_USERNAME: "cnb"
+          PLUGIN_PASSWORD: ${{ secrets.GIT_PASSWORD }}
+          PLUGIN_FORCE: "true"
