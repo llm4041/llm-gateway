@@ -1,0 +1,59 @@
+# ============================================================================
+# CNB 流水线：push 到 CNB 后，自动镜像到 GitHub
+# ----------------------------------------------------------------------------
+# 前置条件（详见对话说明）：
+#   1. 在 CNB 建一个「密钥仓库」(如 luck4041/llm-gateway-secrets)，
+#      里面放 envs.yml，内容： GITHUB_TOKEN: "ghp_xxx（GitHub PAT，repo 权限）"
+#      并在 envs.yml 里加 allow_slugs: luck4041/llm-gateway 限制引用范围。
+#   2. 把下面的 imports 路径改成你自己的密钥仓库路径。
+#   3. 仓库归属(owner)若不是 luck4041 / llm4041，请相应替换。
+#
+# 重要约定：启用本流水线后，CNB 是「唯一可写源」，GitHub 仅作为自动备份。
+#   不要再来往 GitHub 直接 push，否则会被这里的 --force 覆盖。
+#   （注意：本地 main 目前落后 GitHub origin/main 1 个提交，
+#    首次全量镜像会把 GitHub main 覆盖成 CNB 的 main，那个提交会丢失——
+#    如需保留，先用 git fetch origin main && git merge origin/main 合回再推 CNB。）
+# ============================================================================
+
+main:
+  push:
+    - imports:
+        - https://cnb.cool/luck4041/llm-gateway-secrets/-/blob/main/envs.yml
+      stages:
+        - name: mirror-to-github
+          image: alpine/git
+          script: |
+            set -e
+            if [ -z "$GITHUB_TOKEN" ]; then
+              echo "ERROR: GITHUB_TOKEN 未注入，请检查密钥仓库 imports"
+              exit 1
+            fi
+            git config --global --add safe.directory "$PWD"
+            git config --global user.email "ci@cnb.cool"
+            git config --global user.name "CNB Mirror"
+            git remote add github "https://llm4041:${GITHUB_TOKEN}@github.com/llm4041/llm-gateway.git"
+            # 拉取 CNB 上的全部分支，再整体镜像到 GitHub
+            git fetch origin '+refs/heads/*:refs/heads/*'
+            git push github --all --force
+            git push github --tags --force
+
+dev:
+  push:
+    - imports:
+        - https://cnb.cool/luck4041/llm-gateway-secrets/-/blob/main/envs.yml
+      stages:
+        - name: mirror-to-github
+          image: alpine/git
+          script: |
+            set -e
+            if [ -z "$GITHUB_TOKEN" ]; then
+              echo "ERROR: GITHUB_TOKEN 未注入，请检查密钥仓库 imports"
+              exit 1
+            fi
+            git config --global --add safe.directory "$PWD"
+            git config --global user.email "ci@cnb.cool"
+            git config --global user.name "CNB Mirror"
+            git remote add github "https://llm4041:${GITHUB_TOKEN}@github.com/llm4041/llm-gateway.git"
+            git fetch origin '+refs/heads/*:refs/heads/*'
+            git push github --all --force
+            git push github --tags --force
